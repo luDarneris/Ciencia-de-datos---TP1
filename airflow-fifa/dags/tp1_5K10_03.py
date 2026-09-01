@@ -463,7 +463,7 @@ def tp1_5K10_03():
             "Falta la semilla fifa_snapshot.csv del repositorio.")
 
     @task(trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS)
-    def validate(desde_fuente: str | None, desde_snapshot: str | None) -> str:
+    def validate(desde_fuente: str | None, desde_snapshot: str | None, **context) -> str:
         """Chequeos duros. Si alguno falla, el DAG falla: no se publica basura."""
         import pandas as pd
 
@@ -477,8 +477,50 @@ def tp1_5K10_03():
             faltan = set(schema.COLUMNS) - set(df.columns)
             sobran = set(df.columns) - set(schema.COLUMNS)
             problemas.append(f"columnas distintas (faltan {faltan}, sobran {sobran})")
-        if len(df) < 500:
+
+        # --- TP1: umbral de volumen, relativo en vez de absoluto -----------
+        # El `< 500` original estaba calibrado para el dataset canónico: 52
+        # ligas, 18.936 filas. Aplicado a una sola liga es inalcanzable —
+        # K League 1 tiene 421 jugadores — así que fallaría siempre.
+        #
+        # Pero el número no es lo que hay que ajustar: hay que ajustar la
+        # pregunta. Ese chequeo no protege "que haya muchas filas", protege
+        # "que no se publique una corrida truncada" (la fuente cortó a mitad,
+        # Cloudflare bloqueó, el parser se rompió).
+        #
+        # Se reformula entonces contra lo que la propia fuente declara para
+        # esta liga en este snapshot: `n_players` del catálogo de sofifa, que
+        # discover_leagues ya dejó en XCom. El 10% de tolerancia cubre el
+        # desfasaje normal entre el conteo del catálogo y el del listado.
+        #
+        # De paso queda más estricto que el original: 500 sobre 18.936
+        # toleraba perder el 97% de los datos sin que nadie se enterara.
+
+        ligas = context["ti"].xcom_pull(task_ids="discover_leagues") or []
+        if ligas:
+            esperados = ligas[0]["n_players"]
+            if context["params"]["mode"] == "subset":
+                esperados = min(esperados, PAGE_SIZE)   # subset trunca a 1 página
+            piso = int(esperados * 0.90)
+            if len(df) < piso:
+                problemas.append(
+                    f"muy pocas filas: {len(df)}, sofifa declara {esperados} "
+                    f"para la liga {LEAGUE_ID} (piso {piso})")
+        elif len(df) < 100:
+            # Rama del respaldo: no hay catálogo contra qué comparar.
             problemas.append(f"muy pocas filas: {len(df)}")
+
+        # --- TP1: pureza de liga -------------------------------------------
+        # Chequeo nuevo, que el original no necesitaba porque mezclaba 52
+        # ligas a propósito. Acá una liga ajena sería un bug del filtro, y es
+        # exactamente lo que la corrección verifica del CSV.
+
+        presentes = sorted(pd.to_numeric(df["league_id"], errors="coerce")
+                           .dropna().astype(int).unique())
+        if presentes != [LEAGUE_ID]:
+            problemas.append(
+                f"se esperaba sólo la liga {LEAGUE_ID} y hay {presentes}")
+
         if df["player_id"].duplicated().any():
             problemas.append(f"{df['player_id'].duplicated().sum()} player_id repetidos")
         for c in schema.OBLIGATORIAS:
