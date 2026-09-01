@@ -73,6 +73,25 @@ BRONCE_DIR = OUTPUT_DIR / "bronze"
 PLATA_DIR = OUTPUT_DIR / "silver"
 PARTIAL_DIR = PLATA_DIR / "_parciales"
 
+# ---------------------------------------------------------------------------
+# TP1 · Ciencia de Datos · UTN FRM 2026 · Grupo 5K10-03
+# ---------------------------------------------------------------------------
+COMISION = "5K10"
+GRUPO = "03"
+CODIGO = f"{COMISION}-{GRUPO}"            # 5K10-03
+NOMBRE = f"tp1_{COMISION}_{GRUPO}"        # tp1_5K10_03
+LEAGUE_ID = 83                            # K League 1, Korea Republic
+INTEGRANTES = [
+    "Bacin Rauber, Janaina",
+    "Darneris, Lucía",
+    "Galdeano, Huilén",
+    "Peruzzi, Agustín Luis",
+]
+
+# Rutas que necesita la tarea de empaquetado.
+LOGS_DIR = Path("/usr/local/airflow/logs")
+DAGS_DIR = Path("/usr/local/airflow/dags")
+
 
 def bronze_path(roster, league_id, offset) -> Path:
     """Dónde vive una página cruda.
@@ -115,7 +134,7 @@ ULTIMO_OK = FROZEN_DIR / "ultimo_ok.csv"
 
 
 @dag(
-    dag_id="fifa_ingest",
+    dag_id=NOMBRE,
     # Mira la fuente todos los días. `catchup=False` evita que, si el entorno
     # estuvo apagado una semana, Airflow intente recuperar las siete corridas.
     schedule="@daily",
@@ -154,7 +173,7 @@ ULTIMO_OK = FROZEN_DIR / "ultimo_ok.csv"
         ),
     },
 )
-def fifa_ingest():
+def tp1_5K10_03():
 
     @task.sensor(poke_interval=300, timeout=1800, mode="reschedule",
                  soft_fail=True)
@@ -524,4 +543,4 @@ def fifa_ingest():
     save(validate(consolidado, congelado))
 
 
-fifa_ingest()
+tp1_5K10_03()
