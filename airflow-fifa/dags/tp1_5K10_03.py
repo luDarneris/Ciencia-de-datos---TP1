@@ -287,7 +287,18 @@ def tp1_5K10_03():
                 "No se pudo determinar el snapshot de sofifa. El bronce se "
                 "particiona por roster, así que necesita uno concreto.")
 
-        catalogo = fetch_catalog(engine=params["engine"], roster=roster)
+        # El DAG original baja las 52 ligas del catálogo. Nuestro dataset es
+        # el de K League 1, así que el catálogo se filtra ACÁ, antes de armar
+        # las tareas: land_bronze se expande sobre una liga sola y no se le
+        # pide a sofifa ni una página de más.
+
+        catalogo = [lg for lg in fetch_catalog(engine=params["engine"], roster=roster)
+                    if lg["league_id"] == LEAGUE_ID]
+        if not catalogo:
+            raise ValueError(
+                f"La liga {LEAGUE_ID} no está en el catálogo del snapshot "
+                f"{roster}. Revisá el league_id o el roster.")
+
         tope = 1 if params["mode"] == "subset" else None
 
         tareas = []
