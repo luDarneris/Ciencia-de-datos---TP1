@@ -1,0 +1,742 @@
+
+Índice
+UTN FRM
+Unidad 1 · Ingeniería de datos
+
+Introducción a Apache Airflow
+Cómo se orquesta un pipeline de datos, contado sobre los dos DAGs que vas a tener corriendo en tu máquina.
+
+Este apunte acompaña la Unidad 1 y está escrito para leerse de corrido. No es un resumen de la documentación de Airflow: es la explicación de dos DAGs que vas a tener corriendo en tu propia máquina, y de los conceptos que hacen falta para entenderlos.
+
+Cada vez que aparezca un recuadro Al código, hacé clic: se abre el archivo real, con las líneas de las que estamos hablando resaltadas. El código que ves en el apunte es exactamente el que corre.
+
+1. Qué es Apache Airflow
+Airflow es un orquestador de flujos de trabajo. Su trabajo no es procesar datos: es decidir qué se ejecuta, cuándo, en qué orden, y qué hacer cuando algo falla.
+
+Esa distinción importa más de lo que parece. Airflow no reemplaza a pandas ni a un motor de base de datos. Si tu pipeline transforma un millón de filas, quien las transforma sigue siendo pandas; Airflow se encarga de que esa transformación arranque después de la descarga, de reintentarla si se cae, de registrar cuánto tardó y de avisarte si no terminó.
+
+1.1 Flujos de trabajo como código
+La idea central es que el flujo se escribe en Python, no se dibuja en una interfaz. Un pipeline es un archivo .py como cualquier otro, y eso trae consecuencias prácticas:
+
+Se versiona con Git, con historial y revisión de cambios.
+Se puede generar programáticamente: si tenés cincuenta tablas que migrar, no dibujás cincuenta cajitas, escribís un for.
+Se prueba con las mismas herramientas que cualquier código Python.
+1.2 El modelo mental: DAGs
+Un pipeline en Airflow es un DAG: Directed Acyclic Graph, grafo dirigido acíclico. Cada palabra del nombre significa algo concreto.
+
+Grafo: hay tareas y hay relaciones entre ellas. Dirigido: las relaciones tienen sentido — A va antes que B, no al revés. Acíclico: no puede haber ciclos. Si A depende de B y B depende de A, no hay forma de empezar, y Airflow directamente rechaza el DAG.
+
+GRAFO DIRIGIDO ACÍCLICO
+extraer
+sin dependencias
+transformar A
+transformar B
+combinar
+guardar
+A y B no dependen entre sí: Airflow las corre en paralelo
+Las dependencias definen el orden. Lo que no está conectado, corre en paralelo.
+Lo que no define un DAG es igual de importante: no dice en qué máquina corre cada tarea, ni cuánto tarda, ni qué pasa si una falla. Todo eso es configuración, y se resuelve aparte.
+
+1.3 Quién hace qué
+Airflow no es un solo programa. Son varios procesos que se coordinan a través de una base de datos, nunca hablándose directo entre ellos.
+
+QUIÉN HACE QUÉ
+metadata DB
+el estado de todo
+dag-processor
+lee y parsea los .py
+api-server
+la interfaz web
+scheduler
+decide qué corre
+triggerer
+espera asincrónico
+Todo pasa por acá.
+Ningún proceso le habla directo a otro.
+En Airflow 2 el dag-processor vivía dentro del scheduler; en 3 es un proceso aparte.
+Cuando arranques el entorno vas a ver estos contenedores levantarse.
+Proceso	Qué hace
+dag-processor	Lee los archivos .py de la carpeta dags/ y registra lo que encuentra. En Airflow 2 vivía dentro del scheduler; en 3 es un proceso aparte.
+scheduler	Decide qué tarea está lista para correr y la manda a ejecutar.
+api-server	La interfaz web y la API. En Airflow 2 se llamaba webserver.
+triggerer	Maneja las esperas asincrónicas. Volvemos a él en la sección 9.
+metadata DB	El estado de todo: qué corrió, cuándo, con qué resultado.
+Que el dag-processor sea un proceso separado explica algo que vas a notar enseguida: cuando creás un DAG nuevo, tarda unos segundos en aparecer en la interfaz. No está roto, está esperando a que el procesador vuelva a escanear la carpeta.
+
+1.4 Airflow, providers, Astro: qué es cada cosa
+Acá se arma una confusión que conviene despejar antes de seguir, porque los nombres se mezclan y en los tutoriales aparecen sin presentación.
+
+Apache Airflow es el proyecto de software libre. Es lo que realmente orquesta: el scheduler, la base de metadatos, la interfaz. Lo mantiene la Apache Software Foundation y es gratis.
+
+Los providers son paquetes que le agregan integraciones. Airflow no sabe hablar con Postgres, con Amazon S3 ni con una API HTTP: eso lo aportan apache-airflow-providers-postgres, -amazon, -http. Se instalan como cualquier paquete de Python y traen operadores, hooks y tipos de conexión.
+
+Astronomer es una empresa que vive de Airflow. Publica dos cosas que nosotros usamos y que no son Airflow:
+
+Astro Runtime es una imagen de Docker con Airflow ya armado y probado, con sus dependencias resueltas. Es lo que dice la primera línea del Dockerfile del proyecto.
+Astro CLI es la herramienta de línea de comandos que levanta esa imagen en tu máquina. astro dev start no es un comando de Airflow: es de Astro.
+Podrías correr Airflow sin ninguna de las dos, armando la base de datos y los procesos a mano. Usamos Astro porque ahorra esa tarde de configuración.
+
+Los plugins son otra cosa más. Sirven para extender la propia interfaz de Airflow —agregar una pestaña, un menú, una vista— y son bastante raros en la práctica. En esta materia no vamos a escribir ninguno; los nombro para que el término no te confunda si aparece.
+
+Nombre	Qué es	¿Se puede vivir sin?
+Apache Airflow	El orquestador	No, es el corazón
+Providers	Integraciones con sistemas externos	Sí, pero casi siempre querés alguno
+Astro Runtime	Imagen de Docker con Airflow listo	Sí, se puede instalar a mano
+Astro CLI	Comando para levantar el entorno local	Sí, se puede usar Docker directo
+Plugins	Extensiones de la interfaz	Sí, casi nadie escribe uno
+2. Los dos ejemplos de la materia
+El proyecto que van a clonar trae dos DAGs. No es casualidad ni acumulación: son las dos formas de conseguir datos que se van a encontrar cuando elijan la fuente de su proyecto integrador.
+
+2.1 pokemon_api — una API REST
+Consulta la PokéAPI, que devuelve JSON limpio, no pide autenticación y responde en menos de un segundo. Es el caso amable: alguien del otro lado publicó los datos para que los consumas.
+
+Son unas sesenta líneas y se lee de una sentada. Es el DAG que vamos a usar para explicar los componentes.
+
+2.2 fifa_ingest — scraping
+Construye el dataset canónico de la materia a partir del listado público de sofifa.com. Acá nadie publicó nada para vos: hay que pedir HTML pensado para que lo lea una persona, parsearlo, y convivir con que el sitio puede bloquearte.
+
+Son unas quinientas líneas y produce 18.936 filas. Es el DAG que van a modificar en el TP.
+
+2.3 La comparación
+pokemon_api	fifa_ingest
+Fuente	API REST, JSON limpio	HTML que hay que parsear
+Acceso	HttpOperator + HttpHook sobre una Connection	urllib a mano, sin provider
+Cuándo corre	a demanda	programado, todos los días
+Paralelismo	fijo, dos ramas escritas a mano	dinámico, .expand() sobre 52 ligas
+Datos entre tareas	XCom, son 20 filas	archivos en disco, son 18.936
+Capas	una sola: pide y guarda	bronce y plata, separadas en dos tareas
+Ante fallos	reintentos	degradación en tres niveles
+Ninguna de esas diferencias es capricho. Cada una responde a cómo es la fuente. Leer esa tabla de izquierda a derecha, preguntándose por qué, es medio programa de esta unidad.
+
+2.4 Bronce y plata: las capas en el grafo
+En la clase teórica vimos el modelo medallón: los datos no van de la fuente al análisis de un salto, sino que atraviesan capas, y cada capa tiene una regla distinta. fifa_ingest implementa las dos primeras, y no como una convención de nombres de archivo: como dos tareas distintas que se ven en el grafo.
+
+Capa	Tarea	Qué guarda	Regla
+Bronce	land_bronze	el HTML tal como lo devolvió sofifa	append-only: lo que ya está, no se vuelve a pedir
+Plata	refine_silver + consolidate	filas tipadas, una por jugador	validada antes de publicarse
+La pregunta obvia es por qué guardar el HTML crudo si al final lo que querés es la tabla. Dos razones, y las dos aparecen apenas el pipeline vive más de una semana:
+
+La fuente se toca una vez por dato, no una vez por corrida. Si la página ya está en bronce, land_bronze no la pide. La segunda corrida sobre el mismo snapshot no genera una sola request.
+Un bug en el parseo no obliga a volver a la fuente. Si mañana descubrís que estabas leyendo mal la columna de altura, corregís refine_silver y reprocesás lo que ya está en disco. Sin bronce, ese arreglo significa scrapear sofifa de nuevo — y si el sitio cambió en el medio, los datos viejos no se pueden recuperar nunca más.
+La tercera capa del modelo, oro — features derivadas, agregados por liga — no se construye acá. Es lo que van a armar en las unidades 3 y 4 sobre esta misma plata.
+
+Una aclaración que conviene tener clara, porque es una confusión frecuente: el respaldo congelado del que hablamos más adelante no es bronce. Es plata ya parseada. Sirve para salvar la corrida de hoy, pero no permite reprocesar nada.
+
+3. Estructura de un DAG
+3.1 El decorador @dag
+La forma actual de definir un DAG es decorando una función. Todo lo que se declare adentro forma parte del grafo.
+
+@dag(
+    dag_id="pokemon_api",
+    schedule=None,
+    start_date=pendulum.datetime(2026, 8, 1, tz="America/Argentina/Buenos_Aires"),
+    catchup=False,
+    tags=["ciencia-de-datos", "unidad-1"],
+)
+def pokemon_api():
+    ...
+
+pokemon_api()
+Esa última línea, la llamada a la función, es la que instancia el DAG. Sin ella el archivo se parsea sin errores y no aparece nada en la interfaz: es uno de los olvidos más comunes.
+
+
+↳
+Al código
+dags/pokemon_api.py
+pokemon_api
+líneas 42–171
+El decorador, los parámetros y el cuerpo del DAG completo. Fijate que el archivo termina llamando a la función.
+
+3.2 Los parámetros del DAG
+Parámetro	Qué controla
+dag_id	El identificador único. Es lo que ves en la interfaz.
+schedule	Cada cuánto corre. None = sólo a demanda; "@daily", "0 8 * * *", etc.
+start_date	Desde cuándo tiene sentido que corra.
+catchup	Si al arrancar debe recuperar las corridas que se perdió.
+tags	Etiquetas para filtrar en la interfaz.
+max_active_tasks	Cuántas tareas del DAG pueden correr a la vez.
+catchup merece un párrafo aparte. Si tu DAG es @daily, arrancó el 1 de agosto y lo prendés el 20, con catchup=True Airflow va a intentar ejecutar las veinte corridas que faltan. A veces es exactamente lo que querés — reprocesar un histórico —, y a veces es una avalancha que no esperabas. Los dos DAGs de la materia lo tienen en False.
+
+3.3 Tareas con @task
+Una tarea es una unidad de trabajo. La forma moderna de escribirla es decorar una función común:
+
+@task
+def traer_atributos(urls: list[str]) -> list[dict]:
+    ...
+    return salida
+Lo interesante es cómo se conectan. Si una tarea recibe como argumento el resultado de otra, Airflow deduce la dependencia solo:
+
+combinar_y_guardar(traer_atributos(urls), traer_especies(urls))
+Ahí no declaramos ningún orden y sin embargo el grafo queda armado: combinar espera a las dos, y las dos esperan a urls. Como traer_atributos y traer_especies no dependen entre sí, corren en paralelo.
+
+3.4 La forma clásica, que vas a encontrar googleando
+Antes de los decoradores, un DAG se escribía así:
+
+with DAG(dag_id="mi_dag", schedule=None, ...) as dag:
+    a = PythonOperator(task_id="a", python_callable=funcion_a)
+    b = PythonOperator(task_id="b", python_callable=funcion_b)
+    a >> b
+Sigue siendo válido y vas a verlo en la mayoría de los tutoriales, porque hay mucho material escrito para Airflow 2. Conviene saber leerlo. Pero para escribir código nuevo, la forma con decoradores es más corta y evita el paso manual de declarar dependencias.
+
+3.5 El operador >>
+Cuando dos tareas no se pasan datos pero sí necesitan un orden, se declara a mano con >>:
+
+espera >> rama
+rama >> [novedad, congelado]
+Se lee "espera va antes que rama". La lista significa que rama va antes que las dos.
+
+CÓMO SE ARMA EL GRAFO
+INFERIDA · pasando resultados
+combinar(traer_a(urls), traer_b(urls))
+traer_a
+traer_b
+combinar
+Airflow deduce el orden del paso de
+argumentos. No escribiste ninguna flecha.
+DECLARADA · con >>
+rama >> [novedad, congelado]
+rama
+novedad
+congelado
+Estas tareas no se pasan datos: sólo
+necesitan un orden. Hay que decirlo.
+Dos formas de armar el mismo tipo de grafo. La de la izquierda es la que vas a usar casi siempre.
+La diferencia de fondo es simple: si entre dos tareas viajan datos, la dependencia sale sola; si no viajan datos, hay que declararla. En fifa_ingest, las únicas dependencias escritas a mano son las de las tareas de decisión, que no se pasan nada entre sí — sólo ordenan el flujo.
+
+
+↳
+Al código
+dags/fifa_ingest.py
+fifa_ingest
+líneas 116–524
+El final del archivo, donde se instancian las tareas y se declaran las únicas dependencias que hicieron falta a mano.
+
+4. Operadores, hooks y funciones propias
+4.1 Qué es un operador
+Un operador es una plantilla de tarea: encapsula una acción frecuente para que no la escribas vos. Hacer una petición HTTP, correr una consulta SQL, ejecutar un comando de shell, mover un archivo.
+
+Con un operador no programás la acción, la configurás:
+
+listar = HttpOperator(
+    task_id="listar_pokemon",
+    http_conn_id="pokeapi",
+    endpoint="api/v2/pokemon",
+    method="GET",
+    response_filter=lambda r: [x["url"] for x in r.json()["results"]],
+)
+No hay una sola línea que abra una conexión, mande el pedido o maneje la respuesta. Todo eso lo pone el operador.
+
+response_filter: qué se guarda de la respuesta
+Ese parámetro merece atención porque resuelve un problema que no es obvio.
+
+Un operador HTTP recibe un objeto Response: código de estado, encabezados, cuerpo, la conexión. Ese objeto no se puede guardar en XCom, porque no es serializable — no hay forma de convertirlo a algo que entre en la base de metadatos y salga igual del otro lado.
+
+response_filter es la función que decide qué parte de la respuesta sobrevive. Recibe el Response y devuelve lo que querés conservar:
+
+response_filter=lambda r: [x["url"] for x in r.json()["results"]]
+Ahí estamos diciendo: de todo lo que devolvió la API, quedate sólo con la lista de URLs. Eso es lo que va a XCom y lo que va a recibir la tarea siguiente.
+
+Sin response_filter tenés dos problemas. El obvio es el error de serialización. El menos obvio es que, aun cuando funcione, estarías guardando el JSON entero de la respuesta en la base de Airflow, cuando quizás sólo necesitás tres campos.
+
+Es la primera aparición de una idea que vuelve en la sección 7: decidir conscientemente qué viaja entre tareas.
+
+4.2 Hooks: la capa de abajo
+Un operador no hace la magia solo: por dentro usa un hook, que es la pieza que sabe hablar con un sistema externo y sabe leer una conexión.
+
+Cuando el operador prefabricado no te alcanza —porque necesitás recorrer una lista, filtrar, decidir— podés usar el hook directamente desde tu propia función, sin perder la conexión:
+
+@task
+def traer_atributos(urls: list[str]) -> list[dict]:
+    hook = HttpHook(method="GET", http_conn_id="pokeapi")
+    for url in urls:
+        d = hook.run(endpoint=f"api/v2/pokemon/{pid}").json()
+TRES FORMAS DE HACER LO MISMO
+HttpOperator
+lo configurás, no lo escribís
+@task + HttpHook
+tu lógica, su conexión
+Connection
+host, credenciales
+usa un hook por dentro
+usás el hook vos
+Y si no hay red de por medio: @task pelado, sin conexión ni hook.
+El operador usa un hook por dentro. Vos podés usar el mismo hook desde tu código.
+4.3 Las tres opciones, y cuándo va cada una
+Escribís	Cuándo
+Operador prefabricado	La acción es estándar y alguien ya la resolvió bien
+@task + hook	Necesitás lógica propia, pero querés reusar la conexión y el manejo de errores
+@task pelado	No hay sistema externo de por medio: transformar, validar, guardar
+Los tres casos están en un solo archivo de sesenta líneas.
+
+
+↳
+Al código
+dags/pokemon_api.py
+listar
+líneas 65–73
+Operador prefabricado. Sólo configuración: ni una línea de código de red.
+
+
+↳
+Al código
+dags/pokemon_api.py
+traer_atributos
+líneas 79–108
+El mismo pedido HTTP, pero con lógica propia alrededor. El hook aporta la conexión.
+
+
+↳
+Al código
+dags/pokemon_api.py
+combinar_y_guardar
+líneas 134–168
+Sin red: sólo pandas y disco. Un @task común y corriente.
+
+4.4 Providers: qué viene y qué se instala
+Airflow trae un núcleo chico. Todo lo que sea "hablar con algo de afuera" vive en providers, que son paquetes de Python separados. Cada uno aporta tres cosas: operadores, hooks, y tipos de conexión que aparecen en el desplegable de la interfaz.
+
+Sólo dos vienen instalados de fábrica:
+
+Provider	Qué trae
+apache-airflow-providers-standard	PythonOperator, BashOperator, EmptyOperator, los sensores básicos
+apache-airflow-providers-common-sql	La base para todo lo que sea SQL
+El resto se agrega al requirements.txt. Los que más se usan:
+
+Provider	Para qué
+-http	APIs REST. Es el que usa pokemon_api
+-postgres, -mysql	Bases relacionales: correr consultas, cargar tablas
+-amazon, -google, -microsoft-azure	Las tres nubes: S3, BigQuery, Blob Storage
+-docker, -cncf-kubernetes	Correr una tarea dentro de un contenedor
+-slack, -smtp	Avisar cuando algo falla
+-sftp, -ftp	Mover archivos por los protocolos de siempre
+Para agregar uno alcanza con la línea en requirements.txt y reconstruir el entorno:
+
+apache-airflow-providers-http>=6.0
+Esa línea es la que hace que HttpOperator exista. Sin ella el import falla, y el error no dice "te falta un provider": dice ModuleNotFoundError. Es un tropiezo clásico cuando copiás un ejemplo de un tutorial.
+
+En tu proyecto integrador. Antes de escribir código para hablar con tu fuente, fijate si hay un provider que ya lo resuelva. Si tu dato está en una base Postgres o en un bucket de S3, no escribas el cliente a mano.
+
+5. Conexiones
+5.1 Qué problema resuelve
+Una Connection es configuración guardada fuera del código: un host, un puerto, un usuario, una contraseña, un token. Existe para resolver tres cosas.
+
+No poner secretos en el repositorio. Es la razón principal. Una API key hardcodeada en un .py termina en Git, y de ahí no se va nunca más.
+
+Cambiar de entorno sin tocar código. El mismo DAG apunta a la base de desarrollo o a la de producción según qué conexión encuentre.
+
+Compartir configuración entre DAGs. Si diez pipelines usan la misma base, la dirección se escribe una vez.
+
+5.2 Dónde se definen
+Se pueden cargar desde la interfaz web, desde variables de entorno, o —en desarrollo local— desde airflow_settings.yaml, que Astro lee al arrancar:
+
+airflow:
+  connections:
+    - conn_id: pokeapi
+      conn_type: http
+      conn_host: pokeapi.co
+      conn_schema: https
+Por eso la conexión pokeapi ya existe la primera vez que levantás el entorno: no hay que darla de alta a mano.
+
+5.3 Cuándo no hace falta una conexión
+Este es el punto que se pasa por alto. fifa_ingest no usa ninguna, y no es un descuido.
+
+No hay secreto que guardar: sofifa es público. No hay destino que cambie entre entornos: siempre es el mismo sitio. Y lo único que podría vivir en la conexión —la URL base— no es realmente configurable, porque el código que parsea el HTML está atado a ese sitio. Si apuntás la conexión a otro lado, el parseo se rompe igual.
+
+Fijate que en pokemon_api la conexión tampoco guarda un secreto: la PokéAPI es abierta. Ahí no está para proteger nada, sino porque HttpOperator está diseñado para recibir un http_conn_id. No hay que crear una conexión para todo: hay que crearla cuando resuelve un problema que tenés.
+
+En tu proyecto integrador. Si tu fuente pide API key, token o usuario y contraseña, esa credencial va en una Connection, nunca en el .py. Es la diferencia entre un repositorio que se puede compartir y uno que no.
+
+6. El contexto de ejecución
+6.1 Qué es
+Cuando Airflow ejecuta una tarea, le pasa información sobre esa ejecución puntual: qué DAG es, qué corrida, con qué parámetros, en qué fecha lógica. Eso es el contexto, y se accede declarando **context en la función.
+
+@task
+def save(ruta: str, **context) -> str:
+    dag_run = context["dag_run"]
+    params = context["params"]
+6.2 Las claves que más vas a usar
+Clave	Qué trae
+ds	La fecha lógica como texto, 2026-08-19
+logical_date	Lo mismo pero como datetime
+run_id	Identificador único de la corrida
+dag_run	El objeto de la corrida: tipo, estado, fechas
+ti / task_instance	La instancia de esta tarea. Por acá se accede a XCom
+params	Los parámetros con los que se disparó
+6.3 Cuidado con ds
+ds no siempre existe. Sólo tiene sentido cuando el DAG tiene schedule y por lo tanto un intervalo de datos asociado. Si el DAG corre a demanda, pedir context["ds"] levanta KeyError.
+
+La forma robusta es sacar la fecha del DagRun:
+
+dag_run = context["dag_run"]
+momento = dag_run.logical_date or dag_run.run_after
+ds = momento.date().isoformat()
+Es un error clásico al pasar de Airflow 2 a 3, y tiene una particularidad molesta: no aparece siempre. Un DAG con schedule lo trae; uno a demanda no. Por eso conviene no depender de ds y sacar la fecha del DagRun, que existe en los dos casos.
+
+
+↳
+Al código
+dags/fifa_ingest.py
+save
+líneas 466–508
+La tarea que escribe el entregable, con el comentario sobre por qué no usa ds.
+
+6.4 Plantillas Jinja
+Hay dos formas de que una tarea sepa algo de la corrida en la que está, y conviene no confundirlas.
+
+Desde el contexto, que es lo que vimos recién: la función recibe **context y lee lo que necesita. Es Python común, corre cuando la tarea se ejecuta.
+
+@task
+def save(**context):
+    ds = context["dag_run"].logical_date.date().isoformat()
+Con una plantilla Jinja, que es texto con {{ }} adentro:
+
+data={"limit": "{{ params.cantidad }}", "offset": "0"}
+6.5 Por qué existen las dos
+La diferencia es cuándo se resuelve cada una, y de ahí sale cuándo usar cada una.
+
+Cuando Airflow lee tu archivo .py para registrar el DAG, ejecuta el código de definición: crea el objeto HttpOperator con los argumentos que le pasaste. En ese momento la corrida todavía no existe: no hay fecha, no hay parámetros, no hay nada que consultar. Si ahí escribieras context["params"], no habría contexto del que sacarlo.
+
+La plantilla resuelve eso: se guarda como texto y Airflow la reemplaza justo antes de ejecutar la tarea, cuando la corrida ya existe y sus datos están disponibles.
+
+Contexto (**context)	Plantilla Jinja ({{ }})
+Dónde se usa	Adentro de una función @task	En los argumentos de un operador
+Cuándo se resuelve	Al ejecutar, es código normal	Al ejecutar, pero lo reemplaza Airflow
+Qué se puede hacer	Cualquier cosa: if, cálculos, funciones	Interpolar valores y poco más
+La regla práctica. Si estás escribiendo el cuerpo de un @task, usá el contexto: es Python y podés hacer lo que quieras. Si estás configurando un operador prefabricado, no tenés dónde poner código — ahí va la plantilla.
+
+Las variables más usadas en plantillas son {{ ds }} para la fecha, {{ params.lo_que_sea }} para los parámetros, y {{ ti.xcom_pull(...) }} para el resultado de otra tarea.
+
+Un detalle que sorprende: no todos los argumentos de un operador aceptan plantillas. Cada operador declara cuáles sí, en un atributo llamado template_fields. Si ponés {{ ds }} en un campo que no está en esa lista, no falla: te queda el texto literal {{ ds }} en el dato. Es de esos errores que cuesta ver.
+
+7. XCom: pasar datos entre tareas
+7.1 Qué es
+Cada tarea corre en su propio proceso. No comparten memoria, así que no alcanza con una variable de Python para pasarse información. XCom es el mecanismo que provee Airflow: una tarea guarda un valor, otra lo lee.
+
+Con TaskFlow es transparente: si una función decorada devuelve algo y otra lo recibe como argumento, eso viajó por XCom.
+
+También se puede usar explícitamente:
+
+context["ti"].xcom_push(key="meta", value=meta)
+meta = context["ti"].xcom_pull(task_ids="wait_for_source")
+7.2 Cuándo no usar XCom
+Acá está lo importante, y es lo que más rompe pipelines de gente que arranca.
+
+Los XCom se guardan en la base de metadatos de Airflow. Esa base está pensada para registrar el estado de las corridas, no para almacenar datos. Si una tarea devuelve dieciocho mil filas, esas filas se serializan y se escriben en la base. Con suficiente volumen, el scheduler se cae.
+
+La regla práctica: por XCom viajan metadatos, no datos. Rutas, identificadores, banderas, conteos. Cuando el volumen crece, la tarea escribe a disco y devuelve la ruta.
+
+PASAR DATOS ENTRE TAREAS
+pokemon_api · 20 filas
+traer_atributos
+combinar
+las filas, por XCom
+Cabe holgado en la base de
+metadatos. No hay problema.
+fifa_ingest · 18.936 filas
+land_bronze
+refine_silver
+sólo las rutas
+bronze/roster=…/liga=13/
+260 MB de HTML por XCom
+tumban el scheduler. Van a
+disco; viajan las rutas.
+El mismo patrón, dos escalas, dos soluciones distintas.
+Los dos DAGs muestran los dos lados. pokemon_api pasa listas de diccionarios entre tareas, y está perfecto: son veinte filas. fifa_ingest escribe a disco y pasa rutas — dos veces, una por capa: land_bronze devuelve dónde quedaron las páginas crudas, y refine_silver devuelve dónde quedó el CSV de su liga.
+
+Fijate el tamaño de lo que se evita: una sola página de sofifa pesa unos 760 KB. Pasar las 345 del catálogo completo por XCom serían 260 MB metidos en la base de metadatos, en una sola corrida. En disco y comprimidas ocupan 16,5 MB.
+
+
+↳
+Al código
+dags/fifa_ingest.py
+land_bronze
+líneas 284–336
+La tarea guarda las páginas en disco y devuelve las rutas, no el HTML. El comentario del final explica por qué.
+
+8. Tareas dinámicas
+8.1 El problema
+Hasta acá, las tareas de un DAG están escritas una por una. Pero muchas veces no sabés cuántas vas a necesitar hasta que corrés: depende de cuántos archivos haya, cuántas tablas, cuántas ligas.
+
+fifa_ingest tiene exactamente ese problema. sofifa publica un catálogo de ligas, y ese catálogo cambia entre versiones del juego: la actualización de agosto de 2025 tenía 51 ligas y la de julio de 2026 tiene 52. Escribir 52 tareas a mano sería, además de tedioso, incorrecto.
+
+8.2 .expand()
+La solución es el dynamic task mapping: escribís una tarea y le pedís a Airflow que la instancie una vez por elemento de una lista.
+
+ligas = discover_leagues()                     # devuelve 52 diccionarios
+bronces = land_bronze.expand(league=ligas)     # crea 52 instancias
+parciales = refine_silver.expand(lote=bronces) # y otras 52, encadenadas
+Fijate que la segunda se expande sobre la salida de la primera: no hay que saber cuántas ligas hay para escribir ninguna de las dos.
+
+Airflow crea las instancias en tiempo de ejecución, cuando la tarea de arriba ya devolvió la lista.
+
+DYNAMIC TASK MAPPING
+discover_leagues
+devuelve una lista
+refine_silver.expand(lote=bronces)
+Premier League
+La Liga
+Serie A
+… 52 en total
+consolidate
+espera a todas
+La cantidad de tareas no está escrita en el código: la decide la fuente al correr.
+Una tarea en el código, N instancias en la corrida. El número lo decide la fuente.
+8.3 Que el grafo se lea solo
+Por defecto, las instancias mapeadas se numeran: 0, 1, 2… Poco útil cuando querés saber cuál falló. Con map_index_template se les puede dar nombre:
+
+@task(map_index_template="{{ task.op_kwargs['league']['league_name'] }}")
+def land_bronze(league: dict) -> dict:
+Con eso, en la interfaz ves "Premier League" en verde y "Serie A" corriendo, en vez de offset=780.
+
+
+↳
+Al código
+dags/fifa_ingest.py
+land_bronze
+líneas 284–336
+El decorador con map_index_template, y los reintentos.
+
+8.4 Paralelismo
+Que haya 52 tareas listas no significa que corran las 52 a la vez. max_active_tasks en el DAG limita cuántas se ejecutan simultáneamente.
+
+En fifa_ingest está en 8, y el número no es arbitrario: se midió contra sofifa. Más de ocho conexiones simultáneas no acelera nada porque el sitio empieza a frenar, y de paso es una descortesía con una fuente gratuita.
+
+9. Ramificación y control de flujo
+9.1 Elegir el camino en tiempo de ejecución
+A veces el DAG tiene que decidir. @task.branch es una tarea que, en lugar de devolver datos, devuelve el nombre de la tarea que sigue:
+
+@task.branch
+def check_source(**context) -> str:
+    if meta:
+        return "has_new_snapshot"
+    return "load_frozen"
+Airflow ejecuta la rama nombrada y marca la otra como skipped. En la interfaz la vas a ver en gris: no falló, simplemente no correspondía.
+
+9.2 Trigger rules
+Por defecto, una tarea corre cuando todas sus tareas de arriba terminaron con éxito. Esa regla se llama ALL_SUCCESS y casi siempre es la que querés.
+
+Pero no siempre. validate recibe dos entradas: la de la fuente y la del respaldo. Una de las dos siempre viene de una rama salteada. Con la regla por defecto, validate no se ejecutaría nunca.
+
+@task(trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS)
+def validate(desde_fuente, desde_snapshot):
+"Que ninguna haya fallado y que al menos una haya tenido éxito." Salteada no es fallada, así que la condición se cumple.
+
+
+↳
+Al código
+dags/fifa_ingest.py
+validate
+líneas 434–465
+La tarea que recibe las dos ramas, y la regla que le permite correr.
+
+Hay una situación parecida con check_source, que usa ALL_DONE: corre pase lo que pase con la tarea de arriba, porque su trabajo es justamente manejar el caso en que esa tarea no consiguió nada.
+
+9.3 Sensores: esperar lo que no controlás
+Un sensor es una tarea que espera a que se cumpla una condición, sondeando cada tanto.
+
+Acá hay un malentendido frecuente que conviene despejar. Mirando fifa_ingest uno podría pensar en poner un sensor que espere a que estén los 52 archivos parciales antes de consolidar. Sería un error. Esa espera ya está garantizada por la dependencia: consolidate(parciales) no arranca hasta que las 52 instancias terminaron bien. Un sensor ahí sería redundante, y agregaría un modo de falla nuevo.
+
+Los sensores son para lo que está fuera del control del DAG. Un archivo que deja otro sistema, un proceso ajeno que termina, un sitio que vuelve. Adentro del DAG, para eso están las dependencias.
+
+El sensor legítimo de fifa_ingest espera a que sofifa esté disponible:
+
+@task.sensor(poke_interval=300, timeout=1800, mode="reschedule", soft_fail=True)
+def wait_for_source(**context) -> PokeReturnValue:
+Sondea cada cinco minutos durante media hora. Un corte de diez minutos ya no arruina la corrida del día.
+
+9.4 poke contra reschedule
+Los dos parámetros que más importan de un sensor son poke_interval —cada cuánto revisa— y mode, que define qué hace entre revisión y revisión.
+
+ESPERAR SIN OCUPAR UN WORKER
+modo poke
+worker ocupado los 30 minutos
+modo reschedule
+sondea, se libera, vuelve. El worker queda disponible entre medio.
+Con un sensor da igual.
+Con cincuenta, es la diferencia
+entre un scheduler sano y uno tapado.
+En modo poke el worker queda ocupado esperando; en reschedule se libera.
+En modo poke, la tarea se queda ocupando un worker durante toda la espera. Con un sensor da igual. Con cincuenta esperando, tenés cincuenta workers durmiendo y el resto del pipeline frenado.
+
+En modo reschedule, la tarea se libera después de cada sondeo y Airflow la vuelve a encolar más tarde. La espera no cuesta un worker.
+
+Esa idea —esperar sin ocupar recursos— llevada al extremo son los deferrable operators, que delegan la espera a un proceso especializado. Ese proceso es el contenedor triggerer que ves levantarse con el entorno.
+
+
+↳
+Al código
+dags/fifa_ingest.py
+wait_for_source
+líneas 158–192
+El sensor completo, con el comentario sobre soft_fail y reschedule.
+
+9.5 Cortocircuito: no hacer nada, bien
+@task.short_circuit es una tarea que devuelve un booleano. Si devuelve False, todo lo que está aguas abajo queda en skipped y la corrida termina en éxito.
+
+fifa_ingest corre todos los días, pero sofifa publica un parche cada una o dos semanas. Bajar 18.936 filas a diario sería rehacer el mismo trabajo seis de cada siete veces.
+
+ultimo = Variable.get("fifa_ultimo_roster", default=None)
+if str(actual) == str(ultimo):
+    return False        # no hay nada que hacer
+La mayoría de las corridas de un pipeline sano no hacen nada, y eso está bien. Lo que no está bien es no darse cuenta.
+
+Ahí aparece otra pieza: las Variables, que son valores con nombre guardados en Airflow. Sirven justo para esto — recordar algo entre una corrida y la siguiente.
+
+
+↳
+Al código
+dags/fifa_ingest.py
+has_new_snapshot
+líneas 208–246
+El cortocircuito, la Variable, y las dos excepciones deliberadas.
+
+9.6 Diseñar la degradación
+Juntando branching, sensores y cortocircuito, fifa_ingest implementa tres niveles de degradación.
+
+QUÉ PASA CUANDO LA FUENTE FALLA
+1 · HTTP con urllib
+~0,5 s por página · el camino normal
+2 · Playwright + Chromium
+~3 s por página · sobrevive al filtro
+3 · Respaldo en disco
+instantáneo · datos de otro día
+si responde 403
+si no vuelve en 30 min
+Mismo dato, otra puerta.
+Los dos primeros niveles viven adentro de una
+función de Python, no en el grafo: se reintenta
+en silencio porque no hay nada que comunicar.
+Dato distinto, más viejo.
+Este sí es una rama visible del grafo,
+con aviso en el log: los datos no son de hoy.
+Cada escalón cuesta más y da datos menos frescos, pero siempre devuelve algo.
+Fijate dónde vive cada nivel. Los dos primeros están adentro de una función de Python, no en el grafo: son la misma página por otra puerta, así que el reintento es transparente y no hay ninguna decisión que comunicar. El tercero sí es una rama visible, porque ahí el dato es otro —más viejo— y eso hay que avisarlo.
+
+La regla que ordena todo: si el dato es el mismo, reintentá en silencio; si el dato es distinto, hacelo visible.
+
+Una última cosa sobre esto, que no es sobre Airflow. Las decisiones de este DAG —usar urllib y no requests, pasar rutas y no filas, degradar en tres niveles— no salieron de un libro. Salieron de chocarse con la fuente: descubrir que Cloudflare filtra por librería, que el scheduler se cae con XCom grandes, que las fichas de jugador pasaron a exigir cuenta.
+
+Eso es ingeniería de datos. La herramienta se aprende en un apunte; el resto se aprende peleándose con una fuente real, que es exactamente lo que van a hacer en el proyecto integrador.
+
+10. Parámetros de corrida
+Un DAG puede declarar qué se le puede configurar al dispararlo, con Param:
+
+params={
+    "mode": Param("subset", enum=["subset", "full"],
+                  title="Modo de corrida",
+                  description="subset: la primera página de cada liga..."),
+}
+Eso hace dos cosas: valida los valores, y genera un formulario en la interfaz. Cuando entrás al DAG y elegís Trigger DAG w/ config, Airflow arma los campos solo: un desplegable para los enum, una casilla para los booleanos, un campo numérico para los enteros. El title y la description son lo que va a leer quien dispare el DAG, así que vale la pena escribirlos bien.
+
+Es la forma recomendada de correr los DAGs de la materia: desde la interfaz. Es más difícil equivocarse que escribiendo un JSON a mano, y ves enseguida qué valores acepta cada parámetro.
+
+El parámetro roster de fifa_ingest merece atención porque resuelve algo importante: reproducibilidad. sofifa guarda 46 versiones de su base. Fijando el roster, el DAG produce el mismo dataset hoy que en noviembre.
+
+11. Idempotencia
+Una tarea es idempotente cuando ejecutarla dos veces deja el mismo resultado que ejecutarla una.
+
+Suena teórico hasta la primera vez que un pipeline se cae por la mitad y tenés que volver a correrlo. Si las tareas son idempotentes, lo relanzás sin pensar. Si no lo son, tenés que averiguar qué alcanzó a hacer antes de morir.
+
+save escribe siempre fifa_AAAA-MM-DD.csv, con la fecha de la corrida. Correrlo dos veces el mismo día sobrescribe el archivo; no deja dos. Si en cambio numerara los archivos, cada reintento agregaría uno nuevo y el conteo final dependería de cuántas veces falló.
+
+El bronce es el otro caso, y es el más interesante porque la idempotencia sale de no hacer nada. land_bronze chequea si la página ya está en disco antes de pedirla, así que correrlo diez veces sobre el mismo snapshot deja exactamente el mismo bronce que correrlo una — y hace nueve veces menos requests. Es la diferencia entre una tarea que puede repetirse sin romper nada y una que además no cuesta repetir.
+
+Los reintentos dependen de esto. retries=2 sólo es seguro si la tarea es idempotente:
+
+@task(retries=2, retry_delay=pendulum.duration(seconds=30))
+12. El entorno local con Astro CLI
+12.1 Qué es
+Levantar Airflow a mano implica una base de datos, varios procesos y bastante configuración. Astro CLI empaqueta todo eso en un comando, apoyándose en Docker.
+
+astro dev start
+La primera vez tarda varios minutos: descarga la imagen base y construye la tuya. Después arranca en segundos.
+
+12.2 La estructura del proyecto
+airflow-fifa/
+├── dags/                  # los .py que Airflow lee
+├── include/               # todo lo demás: módulos, datos, salidas
+├── tests/                 # pruebas
+├── Dockerfile             # la imagen
+├── requirements.txt       # paquetes de Python
+├── packages.txt           # paquetes del sistema (apt)
+└── airflow_settings.yaml  # conexiones, variables y pools locales
+La separación entre dags/ e include/ importa. El dag-processor parsea dags/ cada pocos segundos, así que ahí va sólo la definición del flujo. La lógica pesada vive en include/ y se importa.
+
+12.3 Los comandos que vas a usar
+Comando	Qué hace
+astro dev start	Levanta el entorno
+astro dev stop	Lo para, conservando la base
+astro dev restart	Reinicia y reconstruye la imagen
+astro dev kill	Elimina todo, incluida la base
+astro dev ps	Estado de los contenedores
+astro dev logs -f	Logs en vivo
+astro dev bash --scheduler	Terminal adentro del contenedor
+Cuándo hace falta restart: si tocaste requirements.txt, packages.txt o el Dockerfile. Si sólo cambiaste un DAG o algo de include/, no: esas carpetas están montadas y se recargan solas.
+
+12.4 Requisitos de máquina
+Hace falta Docker Desktop corriendo, y espacio en disco. Los números reales, medidos sobre el proyecto de la materia:
+
+Qué	Cuánto
+Imagen base de Astro Runtime	1,5 GB
+Nuestra imagen, con Chromium para Playwright	2,7 GB (comparte 1,2 GB con la base)
+Base de datos Postgres	0,45 GB
+Total de imágenes	≈ 3,5 GB
+Con eso, 6 a 8 GB libres alcanzan cómodo: las imágenes, las capas intermedias del build y algo de margen. Si sacás el bloque de Chromium del Dockerfile, la imagen baja cerca de un giga.
+
+13. Ahora abrilo vos
+Hasta acá leíste sobre dos DAGs. Lo que sigue es verlos moverse, que es donde los conceptos terminan de acomodarse.
+
+Levantá el entorno. Parado en la carpeta del proyecto:
+
+astro dev start
+La primera vez tarda unos minutos. Cuando termine, abrí localhost:8080 — usuario admin, contraseña admin.
+
+1 · Empezá por pokemon_api. Despausalo con el interruptor y disparalo. Mirá la vista Graph: traer_atributos y traer_especies se ponen en verde al mismo tiempo. Nadie escribió que fueran en paralelo; salió de que ninguna depende de la otra.
+
+2 · Abrí los logs de una tarea. Hacé clic en cualquier cuadradito y después en Logs. Ahí está todo lo que pasó: los pedidos, los reintentos, lo que imprimió tu código. Es el primer lugar a mirar cuando algo falla.
+
+3 · Ahora fifa_ingest, en modo subset. Usá Trigger DAG w/ config y elegí subset en el desplegable. Quedate mirando el grafo: van a aparecer 52 instancias de la misma tarea, cada una con el nombre de su liga, corriendo de a ocho. Eso es .expand() en vivo.
+
+4 · Disparalo de nuevo, sin cambiar nada. Esta vez termina en segundos y casi todo queda en gris. No falló: has_new_snapshot se dio cuenta de que el snapshot no cambió y cortó. La corrida que no hace nada también es un resultado.
+
+5 · Corré fifa_ingest en modo full, con roster en 260046. Son 18.936 jugadores de 52 ligas y tarda un minuto y medio. Fijate cómo land_bronze y refine_silver se pisan: mientras unas ligas todavía están bajando, otras ya se están parseando.
+
+6 · Volvé a dispararlo, igual que recién. Ahora land_bronze termina casi al instante, y en sus logs vas a leer 0 pedidas a sofifa. Las páginas ya están en la capa de bronce. Eso es lo que compra guardar el crudo.
+
+7 · Andá a include/output/. Ahí conviven las capas: bronze/ con el HTML comprimido, silver/ con las filas tipadas, y el CSV fechado que produjo save. Abrilos. Eso es lo que va a alimentar las unidades 2, 3 y 4.
+
+Si algo de eso no se comporta como dice acá, revisá el apéndice B: están los tropiezos más frecuentes con su explicación.
+
+Y cuando lo tengas andando, volvé a mirar la tabla de la sección 2.3 con los dos grafos frescos en la cabeza. Se lee distinto.
+
+Apéndice A · De Airflow 2 a Airflow 3
+Casi todo lo que encuentres googleando va a ser de Airflow 2. Esta es la traducción de lo que más aparece.
+
+Airflow 2	Airflow 3
+from airflow.decorators import dag, task	from airflow.sdk import dag, task
+from airflow.operators.python import PythonOperator	from airflow.providers.standard.operators.python import ...
+from airflow.operators.bash import BashOperator	from airflow.providers.standard.operators.bash import ...
+from airflow.operators.dummy import DummyOperator	EmptyOperator (el módulo dummy ya no existe)
+from airflow.utils.trigger_rule import TriggerRule	from airflow.task.trigger_rule import TriggerRule
+schedule_interval=...	schedule=...
+dag.schedule_interval	dag.schedule
+context["execution_date"]	context["logical_date"]
+context["prev_ds"], context["next_ds"]	ya no existen
+context["conf"]	ya no existe
+servicio webserver	servicio api-server
+el scheduler parsea los DAGs	lo hace el dag-processor, aparte
+Apéndice B · Errores frecuentes
+El DAG no aparece en la interfaz. Esperá unos segundos: el dag-processor escanea cada tanto. Si sigue sin aparecer, es un error de parseo, y Airflow lo muestra en un banner rojo arriba de la lista de DAGs — hacé clic ahí y vas a ver el traceback. La causa más común es que falte la llamada a la función al final del archivo.
+
+ModuleNotFoundError al importar un operador. Te falta el provider en requirements.txt, y después astro dev restart.
+
+Las tareas quedan en queued y no arrancan. El scheduler se cayó. En Docker Desktop, mirá los logs del contenedor scheduler.
+
+KeyError: 'ds'. El DAG no tiene schedule. Sacá la fecha del DagRun.
+
+PermissionError al escribir en include/. El contenedor corre como usuario astro y la carpeta puede ser de root. En Linux o WSL: chmod -R 777 include/output.
+
+Todo se cuelga sin mensaje. Fijate el espacio en disco. Docker se traba en silencio cuando no puede escribir.
+
+Ciencia de Datos · UTN FRM · Ciclo lectivo 2026
+Airflow 3.3 · Astro Runtime 3.3-4

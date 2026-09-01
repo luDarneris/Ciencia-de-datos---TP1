@@ -1,0 +1,95 @@
+TP 1 · Ingeniería de datos con Airflow. Se presenta en la clase del 26/08 y se entrega por campus hasta el miércoles 2 de septiembre. Se resuelve en casa, en grupo. Se entrega un solo archivo .zip, generado por el propio DAG.
+
+El objetivo de este TP no es que escribas un pipeline desde cero: es que leas uno que no escribiste vos, entiendas cómo está armado y lo modifiques con criterio. Es exactamente lo que vas a tener que hacer en tu proyecto integrador, sólo que ahí el pipeline va a ser el tuyo.
+
+El punto de partida
+El proyecto airflow-fifa que levantaste en clase trae el DAG fifa_ingest, que construye el dataset canónico de la materia: 18.936 jugadores de 52 ligas.
+
+Tu grupo va a producir el dataset de una sola liga. Buscá tu código de grupo en la tabla: es el mismo que figura en el campus.
+
+Grupo	Liga	País	league_id	Jugadores (aprox.)
+5K09-01	Ekstraklasa	Poland	66	490
+5K09-02	Pro League	Belgium	4	452
+5K09-03	Super League	China PR	2012	430
+5K09-04	Allsvenskan	Sweden	56	397
+5K09-05	Super League	India	2149	365
+5K09-06	A-League Men	Australia	351	355
+5K09-07	Superliga	Denmark	1	332
+5K09-08	Série A	Brazil	7	280
+5K09-09	Categoría Primera A	Colombia	336	202
+5K09-10	Super League	Greece	63	122
+5K10-01	Süper Lig	Türkiye	68	486
+5K10-02	Liga I	Romania	330	446
+5K10-03	K League 1	Korea Republic	83	421
+5K10-04	Eliteserien	Norway	41	392
+5K10-05	Super League	Switzerland	189	357
+5K10-06	Bundesliga	Austria	80	348
+5K10-07	Premiership	Scotland	50	328
+5K10-08	Premier Division	Republic of Ireland	65	257
+5K10-09	Primera División	Uruguay	338	150
+5K10-10	División Profesional	Paraguay	337	142
+5K10-11	Serie A	Ecuador	2018	141
+5K10-12	Primera Division	Venezuela	2019	138
+5K10-13	Primera Division	Chile	335	137
+5K10-14	Liga 1	Peru	2020	131
+Los cuatro cambios
+Copiá dags/fifa_ingest.py a dags/tp1_<comision>_<grupo>.py —con tu código de grupo, el guión convertido en guión bajo— y cambiale el dag_id para que coincida con el nombre del archivo. No modifiques el DAG original: queda como referencia, y así podés comparar.
+
+1. Filtrar a tu liga
+El DAG hoy baja las 52 ligas del catálogo. Tiene que bajar sólo la tuya.
+
+2. Fijar el snapshot
+Corré el DAG con el parámetro roster en 260046, que es la actualización de sofifa del 23/07/2026. Así tu resultado es reproducible y comparable con el del resto.
+
+3. Arreglar la validación
+Cuando corras el DAG filtrado, la tarea validate va a fallar. No es un error tuyo: es a propósito.
+
+Andá a leer validate y entendé por qué falla. Después decidí cuál es el chequeo correcto para un dataset de una liga y ajustalo.
+
+Vas a tener que justificar tu decisión en la entrega, así que no pongas cualquier número: pensá qué es lo que ese chequeo está protegiendo.
+
+4. Armar el zip de entrega
+Agregá una tarea nueva al final del DAG, después de save, que arme un único archivo tp1_<comision>_<grupo>.zip —con tu código— con:
+
+Contenido	Qué es
+dataset.csv	El CSV que produjo esa corrida.
+logs/	Los logs reales de la corrida, tomados de /usr/local/airflow/logs/dag_id=tp1_5K09_01/.
+manifiesto.json	Generado por código, con los datos de abajo.
+bronce.txt	El listado de las páginas crudas que usó tu corrida: recorré include/output/bronze/ y escribí una ruta por línea.
+tp1_5K09_01.py	El archivo del DAG modificado.
+El manifiesto.json tiene que armarse leyendo la corrida, no escribiendo los valores a mano:
+
+{
+  "grupo": "5K10-02",
+  "integrantes": ["Apellido, Nombre", "..."],
+  "league_id": 330,
+  "league_name": "Liga I",
+  "roster": 260046,
+  "filas": 446,
+  "columnas": 90,
+  "run_id": "manual__2026-08-30T...",
+  "generado_en": "2026-08-30T19:42:11"
+}
+filas y columnas salen de medir el CSV. run_id y league_id salen del contexto de ejecución y de la configuración de la corrida. Si están escritos a mano, se nota.
+
+Qué se entrega
+Un solo archivo: tp1_<comision>_<grupo>.zip —con tu código de grupo—, el que generó el DAG, subido a la tarea del campus. Nada más.
+
+No hace falta que suban el código aparte ni capturas de pantalla: todo está adentro del zip, y todo lo puso ahí el pipeline.
+
+Cómo se corrige
+Se verifica	Cómo
+Que el DAG haya corrido de verdad	Los logs del zip tienen que ser de la corrida que declara el manifiesto, con el mismo run_id.
+Que sea tu liga	El league_id del manifiesto coincide con el asignado, y todas las filas del CSV son de esa liga.
+Que el manifiesto no esté inventado	Las filas y columnas que declara coinciden con el CSV que viene al lado.
+Que la validación tenga sentido	Se lee el código de validate y la justificación del umbral.
+Que el zip lo haya armado el DAG	Está la tarea nueva en el código y aparece en los logs.
+Que el bronce sea de tu liga	Las rutas de bronce.txt llevan el roster y el liga= que te tocaron.
+Un consejo
+Antes de tocar nada, corré el DAG original una vez en modo subset y mirá el grafo entero mientras corre. Entender qué hace cada tarea te va a llevar veinte minutos y te va a ahorrar dos horas.
+
+Y después corrélo una segunda vez. Vas a ver que land_bronze termina casi al instante, y que en sus logs dice 0 pedidas a sofifa: las páginas ya están en la capa de bronce, así que no se vuelven a pedir. Esa es la propiedad que justifica guardar el HTML crudo, y se entiende mucho mejor viéndola que leyéndola.
+
+Los cuatro cambios de este TP están pensados para que tengas que leer, en total, unas cuarenta líneas del DAG. El resto podés ignorarlo.
+
+Si te trabás, preguntá en el foro de Consultas. Las dudas de instalación y de Airflow las tenemos todos: es mucho mejor resolverlas ahí que quedarse tres días peleando en silencio.

@@ -1,0 +1,15 @@
+# Basura de Windows
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+
+# Editores
+.vscode/
+.idea/
+
+# Python
+__pycache__/
+*.pyc
+
+# Zips de entrega: los genera el DAG, no se versionan
+*.zip
