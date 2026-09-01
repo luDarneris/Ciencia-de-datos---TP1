@@ -154,7 +154,7 @@ ULTIMO_OK = FROZEN_DIR / "ultimo_ok.csv"
                          "de 52 ligas, ~1 min y medio."),
         ),
         "roster": Param(
-            None, type=["null", "integer"],
+            260046, type=["null", "integer"],
             title="Snapshot a congelar",
             description=("Id del roster de sofifa, ej. 260046 = FC 26 actualización 46. "
                          "Vacío usa el más reciente. Fijarlo hace la corrida reproducible."),
